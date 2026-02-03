@@ -1,4 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import json
 
 app = FastAPI()
 
@@ -11,21 +12,44 @@ def health():
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
+    device_id = None
 
     try:
         # First message = registration
-        data = await ws.receive_json()
-        device_id = data["device_id"]
+        try:
+            data = await ws.receive_json()
+            device_id = data.get("device_id")
+        except Exception:
+            # If malformed JSON or other error during init
+            await ws.close()
+            return
+
+        if not device_id:
+            await ws.close()
+            return
+
         devices[device_id] = ws
         print(f"{device_id} connected")
 
         while True:
-            msg = await ws.receive_json()
-            target = msg["to"]
+            try:
+                msg = await ws.receive_json()
+                target = msg.get("to")
 
-            if target in devices:
-                await devices[target].send_json(msg)
+                if target and target in devices:
+                    target_ws = devices[target]
+                    await target_ws.send_json(msg)
+                else:
+                    print(f"Target {target} not found for message from {device_id}")
+            except Exception as e:
+                 print(f"Error processing message from {device_id}: {e}")
+                 # Decide whether to break or continue. excessive errors might warrant disconnect.
+                 # For now, we continue to keep the connection alive.
 
     except WebSocketDisconnect:
-        devices.pop(device_id, None)
         print(f"{device_id} disconnected")
+    except Exception as e:
+        print(f"Unexpected error for {device_id}: {e}")
+    finally:
+        if device_id and device_id in devices:
+            devices.pop(device_id, None)
