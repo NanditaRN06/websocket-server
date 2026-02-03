@@ -3,53 +3,57 @@ import json
 
 app = FastAPI()
 
+# In-memory registry: {device_id: websocket_connection}
 devices = {}
 
 @app.get("/")
-def health():
-    return {"status": "WebSocket server running"}
+async def health_check():
+    return {"status": "ok", "active_connections": len(devices)}
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     device_id = None
-
+    
     try:
-        # First message = registration
-        try:
-            data = await ws.receive_json()
-            device_id = data.get("device_id")
-        except Exception:
-            # If malformed JSON or other error during init
-            await ws.close()
-            return
-
+        # 1. Wait for Registration
+        # We expect the first message to be the device identification
+        data = await ws.receive_json()
+        device_id = data.get("device_id")
+        
         if not device_id:
-            await ws.close()
+            await ws.close(code=4003, reason="Device ID required")
             return
-
+            
+        # Register device (Overwrites existing connection if same ID connects again)
         devices[device_id] = ws
-        print(f"{device_id} connected")
+        print(f"Device connected: {device_id}")
 
+        # 2. Message Loop
         while True:
-            try:
-                msg = await ws.receive_json()
-                target = msg.get("to")
-
-                if target and target in devices:
-                    target_ws = devices[target]
-                    await target_ws.send_json(msg)
-                else:
-                    print(f"Target {target} not found for message from {device_id}")
-            except Exception as e:
-                 print(f"Error processing message from {device_id}: {e}")
-                 # Decide whether to break or continue. excessive errors might warrant disconnect.
-                 # For now, we continue to keep the connection alive.
-
+            message = await ws.receive_json()
+            target_id = message.get("to")
+            
+            # Relay logic
+            if target_id and target_id in devices:
+                target_ws = devices[target_id]
+                await target_ws.send_json(message)
+            elif target_id:
+                # Optional: Inform sender that target is offline
+                await ws.send_json({
+                    "type": "error",
+                    "code": "TARGET_OFFLINE",
+                    "message": f"Device {target_id} is not connected."
+                })
+                
     except WebSocketDisconnect:
-        print(f"{device_id} disconnected")
+        print(f"Device disconnected: {device_id}")
     except Exception as e:
-        print(f"Unexpected error for {device_id}: {e}")
+        print(f"Error: {e}")
     finally:
+        # Cleanup on close
         if device_id and device_id in devices:
-            devices.pop(device_id, None)
+             # Only remove if it's the specific socket we're handling 
+             # (handles race condition where user reconnected quickly)
+             if devices[device_id] == ws:
+                del devices[device_id]
